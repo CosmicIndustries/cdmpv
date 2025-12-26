@@ -609,3 +609,129 @@ Everything that **\*I\*** did in `cdmpv` is under CC0 (Public Domain).
 [sugoi-web](https://arzeth.github.io/sugoi-web/) Web Frontend for Sugoi-Japanese-Translator (offline & better than DeepL).
 
 
+
+from: C05M1C
+# cdmpv — Stabilized pipeline & troubleshooting notes (2025-12-26)
+
+## Summary
+
+Stabilized `cdmpv` live-desktop capture → `mpv` pipeline. Root cause analysis, fix applied and operational commands have been recorded here so the environment can be reproduced or rolled back.
+
+Work completed:
+
+* Identified and removed an invalid `mpv` profile (`qrawvideo`) that caused immediate `mpv` exit and subsequent `ffmpeg` broken-pipe failures.
+* Replaced `live-desktop-mpv.sh` with a simplified, robust pipeline wrapper that uses only validated `ffmpeg` and `mpv` flags and writes a small persistent run log.
+* Verified the service starts via user `systemd` (unit: `~/.config/systemd/user/cdmpv-live.service`) and confirmed `mpv` window appears with near real-time latency (~1s).
+* Captured diagnostic outputs and patterns in the log for further tuning.
+
+## Root causes (concise)
+
+1. `mpv` was passed `--profile=qrawvideo` which does not exist on target system — `mpv` immediately exited.
+2. `ffmpeg` produced frames while `mpv` was gone; pipe broke and `ffmpeg` failed with "Broken pipe" and "Conversion failed!".
+3. systemd restarted the service repeatedly, producing a restart storm.
+
+## Files changed (updated) — locations
+
+* `~/cdmpv/live-desktop-mpv.sh` — **replaced** with a simplified robust pipeline (this file contains the runnable pipeline and logging).
+
+Other relevant files (unchanged but important):
+
+* `~/cdmpv/run-cdmpv-wrapper.sh` — wrapper used by the systemd unit. Keep executable.
+* `~/.config/systemd/user/cdmpv-live.service` — user unit that launches the wrapper.
+* Log: `~/.local/state/cdmpv/live-desktop-mpv.log`
+
+## How to start / stop / inspect
+
+Start (user unit):
+
+```bash
+systemctl --user daemon-reload
+systemctl --user enable --now cdmpv-live.service
+```
+
+Stop:
+
+```bash
+systemctl --user stop cdmpv-live.service
+```
+
+Reset failed state (if systemd refuses to start after crashes):
+
+```bash
+systemctl --user reset-failed cdmpv-live.service
+systemctl --user restart cdmpv-live.service
+```
+
+Inspect logs:
+
+```bash
+journalctl --user -u cdmpv-live.service -f
+# and
+tail -n 400 ~/.local/state/cdmpv/live-desktop-mpv.log
+```
+
+## Quick reproducible pipeline (manual test)
+
+Run this to test single-monitor capture and verify offsets without the systemd unit:
+
+```bash
+# Find monitors and offsets
+xrandr --listmonitors
+
+# Example: capture a 1920x1080 region on the second monitor offset (1920,0)
+ffmpeg -hide_banner -nostdin -fflags nobuffer -f x11grab -video_size 1920x1080 -framerate 30 -i :0+1920,0 -pix_fmt yuv420p -f nut - | \
+  mpv --demuxer-lavf-format=nut - --no-audio --force-window=yes --keep-open=yes --untimed
+```
+
+If that produces the expected single-monitor view in `mpv`, you can map those values into `live-desktop-mpv.sh` by setting the `HOST_DISPLAY` and `CAPTURE_OFFSET` (or by editing the script to pass a `:0+X,Y` capture target).
+
+## Known issue: infinite mirror (mirroring both screens)
+
+**Cause:** current pipeline captures the entire X root (`:0`) which on a multi-monitor X server is the combined desktop (all monitors arranged side-by-side). When `mpv` displays the upscaled result on the same X server, if the capture region includes the output window, you get a recursive mirror.
+
+**Mitigations (ordered):**
+
+1. **Capture a single monitor (recommended).** Use `-video_size WxH -i :0+X,Y` where `X,Y` are the top-left pixel of the target monitor. Use `xrandr --listmonitors` to obtain per-monitor geometry and offsets.
+
+2. **Create a small X screen / nested X server for capture.** Use an Xvfb/Xvnc nested instance dedicated solely to the guest environment you upscale; do not render the `mpv` window into that same X screen.
+
+3. **Move `mpv` output to a different display / fullscreen overlay.** Run `mpv` on a separate display (e.g. another virtual display or use Wayland XWayland trickery) so `ffmpeg` capturing `:0` will not include the `mpv` window.
+
+4. **Filter the capture area by window id.** Use `ffmpeg`'s `-i x11grab` with a window ID (if stable) or extract the window geometry and capture only that box — but this is fragile if `mpv` moves.
+
+**Immediate recommended fix (practical):**
+
+* Edit `~/cdmpv/live-desktop-mpv.sh` and set `CAPTURE_TARGET=':0+X,Y'` and `VIDEO_SIZE='WxH'` for the monitor you want to capture. Example values for a primary 1920×1080 monitor at X offset 0:
+
+```bash
+VIDEO_SIZE=1920x1080
+CAPTURE_TARGET=':0+0,0'
+```
+
+* Or launch the manual test command above to discover correct offsets and sizes, then export those into the script or `config.sh`.
+
+## How to revert to previous script (git / backup)
+
+If you had the prior copy in Git, use `git checkout -- ~/cdmpv/live-desktop-mpv.sh`.
+If not, keep a backup before editing in future:
+
+```bash
+cp ~/cdmpv/live-desktop-mpv.sh ~/cdmpv/live-desktop-mpv.sh.bak.$(date -Is)
+```
+
+## Diagnostics snippets collected during the run (high-value lines)
+
+* `mpv` returned: `Unknown profile 'qrawvideo'` → fixed by removing profile.
+* `ffmpeg` errors that followed were `Error muxing a packet` / `Error writing trailer: Broken pipe` — these were secondary to `mpv` exit.
+* Current runtime log location: `~/.local/state/cdmpv/live-desktop-mpv.log` (first lines contain detection output and pipeline command line).
+
+## Next actions (suggested priorities)
+
+1. **Eliminate the mirror** by implementing the single-monitor capture described above. This is quick and low-risk.
+2. **Add an automatic monitor-detection routine** to `live-desktop-mpv.sh` (use `xrandr --listmonitors` or `xdpyinfo` + `xrandr` parsing) and pick the monitor by name (e.g., `DP-2`, `HDMI-1`) or by index.
+3. **Add a `--no-restart-on-failure` or `Restart=on-abnormal` guard** in the systemd unit while debugging to avoid restart storms during edits.
+4. **Integrate shader upscaling & user settings** (shaders + toggles) once the single-monitor capture is stable.
+
+
+
+
