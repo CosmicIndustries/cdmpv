@@ -1,57 +1,65 @@
 #!/usr/bin/env bash
 set -euo pipefail
-IFS=$'\n\t'
 
-LOG="${HOME}/.local/state/cdmpv/live-desktop-mpv.log"
-mkdir -p "$(dirname "$LOG")"
+### CONFIG ###
+FRAMERATE=30
+PRESET=ultrafast
+DISPLAY=${DISPLAY:-:0}
+PIPE=/tmp/cdmpv.pipe
 
-FPS=${FPS:-30}
-HOST_DISPLAY=${HOST_DISPLAY:-:0}
+### Clean up any previous broken pipe ###
+rm -f "$PIPE"
+mkfifo "$PIPE"
 
-{
-  echo
-  echo "==== live-desktop-mpv starting $(date -Is) ===="
-} >>"$LOG"
+### Detect primary monitor ###
+MONITOR=$(xrandr --listmonitors | awk '/\*/ {print $4; exit}')
+[[ -n "$MONITOR" ]] || { echo "No active monitor detected"; exit 1; }
 
-RES=$(xdpyinfo | awk '/dimensions:/ {print $2; exit}')
-WIDTH=${RES%x*}
-HEIGHT=${RES#*x}
+echo "Capturing monitor: $MONITOR"
 
-echo "Resolution: ${WIDTH}x${HEIGHT}" >>"$LOG"
+### Get geometry safely ###
+### Get exact geometry from xrandr line ###
+GEOMETRY=$(xrandr | awk -v m="$MONITOR" '
+$0 ~ ("^"m" ") {
+  for (i=1;i<=NF;i++) {
+    if ($i ~ /^[0-9]+x[0-9]+\+[0-9]+\+[0-9]+$/) {
+      print $i;
+      exit
+    }
+  }
+}')
 
-FFMPEG_CMD=(
-  ffmpeg
-  -hide_banner
-  -loglevel error
-  -nostdin
-  -fflags nobuffer
-  -f x11grab
-  -video_size "${WIDTH}x${HEIGHT}"
-  -framerate "${FPS}"
-  -i "${HOST_DISPLAY}"
-  -pix_fmt yuv420p
-  -f nut
-  -
-)
 
-MPV_CMD=(
-  mpv
-  --no-audio
-  --force-window=yes
-  --keep-open=yes
-  --untimed
-  --cache=no
-  --demuxer-lavf-format=nut
-  -
-)
+WIDTH=${GEOMETRY%%x*}
+REST=${GEOMETRY#*x}
+HEIGHT=${REST%%+*}
+OFFS=${GEOMETRY#*+}
 
-set -o pipefail
+XOFF=${OFFS%%+*}
+YOFF=${OFFS#*+}
 
-echo "Launching pipeline…" >>"$LOG"
+echo "Geometry: ${WIDTH}x${HEIGHT}+${XOFF}+${YOFF}"
 
-"${FFMPEG_CMD[@]}" | "${MPV_CMD[@]}" >>"$LOG" 2>&1
+### Start ffmpeg ###
+ffmpeg -y \
+  -f x11grab \
+  -framerate "$FRAMERATE" \
+  -video_size "${WIDTH}x${HEIGHT}" \
+  -i "${DISPLAY}+${XOFF},${YOFF}" \
+  -c:v libx264 \
+  -preset "$PRESET" \
+  -tune zerolatency \
+  -pix_fmt yuv420p \
+  -f nut "$PIPE" &
 
-RC=$?
+FFPID=$!
 
-echo "Pipeline exited with code $RC" >>"$LOG"
-exit "$RC"
+### Wait for ffmpeg to initialize stream ###
+sleep 0.4
+
+### Start mpv ###
+mpv --no-cache --profile=low-latency "$PIPE"
+
+### Cleanup ###
+kill "$FFPID" 2>/dev/null || true
+rm -f "$PIPE"
