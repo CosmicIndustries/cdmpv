@@ -1,10 +1,11 @@
 ;==========================================================================
-; === Text based config file for dgVoodoo2
+; === Text based config file for dgVoodoo2  
+; === ##Depricated## ( I assume this is for 32 bit machines) C05M1C
 ; === Use this file if you are a game modder/hacker or an experted user and
 ;     want to modify some advanced properties not available via the CPL.
 ;==========================================================================
 
-Version                              = 0x276
+Version                              = 0x277
 
 ;--------------------------------------------------------------------------
 
@@ -319,3 +320,4 @@ Error                               = enable
 MaxTraceLevel                       = 0
 
 LogToFile                           = false
+
